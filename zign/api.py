@@ -1,21 +1,21 @@
-import click
-from clickclick import error, info, UrlType
 import logging
 import os
-import stups_cli.config
-import time
-import tokens
-import requests
 import socket
+import time
 import webbrowser
+from urllib.parse import urlparse, urlunsplit
+
+import click
+import requests
+import stups_cli.config
+import tokens
 import yaml
-
-from .oauth2 import ClientRedirectServer
-
-from .config import OLD_CONFIG_NAME, CONFIG_NAME, REFRESH_TOKEN_FILE_PATH, TOKENS_FILE_PATH
+from clickclick import UrlType, error, info
 from requests import RequestException
-from urllib.parse import urlparse
-from urllib.parse import urlunsplit
+
+from .config import (CONFIG_NAME, OLD_CONFIG_NAME, REFRESH_TOKEN_FILE_PATH,
+                     TOKENS_FILE_PATH)
+from .oauth2 import ClientRedirectServer
 
 TOKEN_MINIMUM_VALIDITY_SECONDS = 60*5  # 5 minutes
 
@@ -59,7 +59,6 @@ def get_config(config_module=None, override=None):
     # Make sure no keys with empty values are present
     override = {k: v for (k, v) in override.items() if v}
     config = stups_cli.config.load_config(config_module)
-    old_config = config.copy()
 
     for oauth2_url, message in {'authorize_url': 'Authorization', 'token_url': 'Token'}.items():
         while oauth2_url not in override and oauth2_url not in config:
@@ -77,9 +76,6 @@ def get_config(config_module=None, override=None):
 
     if 'business_partner_id' not in override and 'business_partner_id' not in config:
         config['business_partner_id'] = click.prompt('Please enter the Business Partner ID')
-
-    if config != old_config:
-        stups_cli.config.store_config(config, config_module)
 
     config.update(override)
     return config
@@ -160,7 +156,7 @@ def perform_implicit_flow(config: dict):
 
     while True:
         try:
-            httpd = ClientRedirectServer(('localhost', port_number))
+            httpd = ClientRedirectServer(('127.0.0.1', port_number))
         except socket.error as e:
             if port_number > max_port_number:
                 success = False
@@ -227,9 +223,17 @@ def get_token_implicit_flow(name=None, authorize_url=None, token_url=None, clien
 
     data = load_config_ztoken(REFRESH_TOKEN_FILE_PATH)
 
-    # Always try with refresh token first
+    # Force prompting for authorize-url and token-url if only one is specified in the parameter list.
+    if authorize_url and not token_url:
+        config['token_url'] = click.prompt('Please enter the OAuth 2 Token Endpoint URL', type=UrlType())
+    elif token_url and not authorize_url:
+        config['authorize_url'] = click.prompt('Please enter the OAuth 2 Authorize Endpoint URL', type=UrlType())
+
+    use_refresh = not (authorize_url or token_url)
+    # Refresh token will be used if authorize_url or token_url aren't specified
+
     refresh_token = data.get('refresh_token')
-    if refresh_token:
+    if refresh_token and use_refresh:
         payload = {'grant_type':            'refresh_token',
                    'client_id':             config['client_id'],
                    'business_partner_id':   config['business_partner_id'],
@@ -244,7 +248,6 @@ def get_token_implicit_flow(name=None, authorize_url=None, token_url=None, clien
                 token['name'] = name
                 store_token(name, token)
 
-            # Store the latest refresh token
             store_config_ztoken({'refresh_token': token['refresh_token']}, REFRESH_TOKEN_FILE_PATH)
             return token
         except RequestException as exception:
@@ -259,9 +262,9 @@ def get_token_implicit_flow(name=None, authorize_url=None, token_url=None, clien
                  'token_type':      response['token_type'],
                  'scope':           ''}
 
-        if token['refresh_token']:
+        # Refresh token is only stored when the default configuration is used
+        if token['refresh_token'] and use_refresh:
             store_config_ztoken({'refresh_token': token['refresh_token']}, REFRESH_TOKEN_FILE_PATH)
-        stups_cli.config.store_config(config, CONFIG_NAME)
 
         if name:
             token['name'] = name
