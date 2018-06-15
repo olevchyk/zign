@@ -1,6 +1,6 @@
+import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
-
+from urllib.parse import urlparse
 
 
 SUCCESS_PAGE = '''<!DOCTYPE HTML>
@@ -35,9 +35,14 @@ EXTRACT_TOKEN_PAGE = '''<!DOCTYPE HTML>
         (function extractFragmentQueryString() {{
             function post(url, body, successCb, errorCb) {{
                 function noop() {{}}
-
-                var success = successCb || noop;
-                var error = errorCb || noop;
+                function successCb(){{
+                    window.location.href = "http://localhost:{port}/?success";
+                }}
+                function errorCb(){{
+                    window.location.href = "http://localhost:{port}/?error";
+                }}
+                var success = successCb || noop;
+                var error = errorCb || noop;
                 var req = new XMLHttpRequest();
                 req.open("POST", url, true);
                 req.setRequestHeader("Content-Type", "application/json");
@@ -106,28 +111,38 @@ ERROR_PAGE = '''<!DOCTYPE HTML>
 class ClientRedirectHandler(BaseHTTPRequestHandler):
     '''Handles OAuth 2.0 redirect and return a success page if the flow has completed.'''
 
-    def do_GET(self):
-        '''Handle the GET request from the redirect.
-
-        Parses the token from the query parameters and returns a success page if the flow has completed'''
-
+    def _set_headers(self, content_type='text/html'):
+        '''Sets initial response headers of the request.'''
         self.send_response(200)
-        self.send_header('Content-type', 'text/html')
+        self.send_header('Content-type', content_type)
         self.end_headers()
+
+    def do_POST(self):
+        '''Handle the POST request from the redirect.
+        Parses the token from the query parameters and returns a success page if the flow has completed'''
+        self._set_headers("application/json")
+
+        self.data_string = self.rfile.read(int(self.headers['Content-Length']))
+        self.server.__tokeninfo = json.loads(self.data_string)
+        if 'access_token' in self.server.__tokeninfo.keys():
+            self.wfile.write('{"status": "success"}'.encode('utf-8'))
+        else:
+            self.send_error(500, json.dumps(self.server.__tokeninfo).encode('utf-8'))
+
+    def do_GET(self):
+        '''Handle initial GET request display EXTRACT_TOKEN_PAGE
+        On succesfull post XMLHttpRequest - displays SUCCESS_PAGE
+        '''
         query_string = urlparse(self.path).query
+        self._set_headers()
 
         if not query_string:
             self.wfile.write(EXTRACT_TOKEN_PAGE.format(port=self.server.server_port).encode('utf-8'))
+        elif 'success' in query_string:
+            self.server.query_params = self.server.__tokeninfo
+            self.wfile.write(SUCCESS_PAGE.encode('utf-8'))
         else:
-            query_params = {}
-            for key, val in parse_qs(query_string).items():
-                query_params[key] = val[0]
-            self.server.query_params = query_params
-            if 'access_token' in self.server.query_params:
-                page = SUCCESS_PAGE
-            else:
-                page = ERROR_PAGE
-            self.wfile.write(page.encode('utf-8'))
+            self.wfile.write(ERROR_PAGE.encode('utf-8'))
 
     def log_message(self, format, *args):
         """Do not log messages to stdout while running as cmd. line program."""
@@ -140,6 +155,7 @@ class ClientRedirectServer(HTTPServer):
     into query_params and then stops serving.
     """
     query_params = {}
+    __tokeninfo = {}
 
     def __init__(self, address):
         super().__init__(address, ClientRedirectHandler)
